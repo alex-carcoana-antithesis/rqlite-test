@@ -67,3 +67,4 @@ curl -G 'localhost:4001/db/query?pretty' --data-urlencode 'q=SELECT * FROM foo'
 
 ## Pronunciation
 Common pronunciations of rqlite include "R Q lite" and "ree-qwell-lite".
+# rqlite-test
