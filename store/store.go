@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/rqlite/rqlite/v10/command"
@@ -2425,6 +2426,9 @@ func (s *Store) waitForLinearizableRead(currReadTerm uint64, linearizableTimeout
 	// See https://groups.google.com/g/raft-dev/c/4QlyV0aptEQ/m/1JxcmSgRAwAJ
 	// for an extensive discussion of this logic.
 	if currReadTerm != s.strongReadTerm.Load() {
+		// Antithesis: the first linearizable read in a new term must be upgraded
+		// to a strong read before it can be served safely (Raft dissertation 6.4).
+		assert.Reachable("linearizable read required upgrade to strong read in new term", nil)
 		return ErrStrongReadNeeded
 	}
 
@@ -2441,6 +2445,9 @@ func (s *Store) waitForLinearizableRead(currReadTerm uint64, linearizableTimeout
 	if err := s.VerifyLeader(); err != nil {
 		return err
 	}
+	// Antithesis: leadership confirmed via a quorum heartbeat round-trip, so the
+	// read-index is safe to serve. This is the linearizable read-index fast path.
+	assert.Reachable("linearizable read verified leadership via quorum read-index", nil)
 	if s.raft.CurrentTerm() != currReadTerm {
 		return ErrStaleRead
 	}

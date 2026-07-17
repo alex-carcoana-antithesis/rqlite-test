@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"github.com/rqlite/rqlite-disco-clients/consul"
 	"github.com/rqlite/rqlite-disco-clients/dns"
 	"github.com/rqlite/rqlite-disco-clients/dnssrv"
@@ -229,6 +230,10 @@ func main() {
 	if err := createCluster(mainCtx, cfg, len(nodes) > 0, clstrClient, str, httpServ, credStr); err != nil {
 		log.Fatalf("clustering failure: %s", err.Error())
 	}
+
+	// Antithesis bootstrap property: proves the SDK is linked and instrumentation
+	// is wired. Every node that starts successfully reaches this point.
+	assert.Reachable("rqlited reached cluster-ready serving state", nil)
 
 	// Tell the user the node is ready for HTTP, giving some advice on how to connect.
 	log.Printf("node HTTP API available at %s", cfg.HTTPURL())
