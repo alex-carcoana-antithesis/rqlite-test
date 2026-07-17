@@ -1,0 +1,78 @@
+name: rqlite
+
+# 3-voter rqlite cluster (minimum quorum, tolerates 1 failure) plus a Python
+# workload driver. Nodes form deterministically via -bootstrap-expect 3 with a
+# static -join list of all three raft addresses. Service names == container_name
+# == hostname so Compose DNS resolves them for Raft/HTTP advertise addresses.
+
+x-node-common: &node-common
+  platform: linux/amd64
+  init: true
+  build:
+    context: ../..
+    dockerfile: antithesis/Dockerfile
+    target: rqlite-node
+  image: rqlite-node:latest
+  command:
+    - "-bootstrap-expect"
+    - "3"
+    - "-join"
+    - "rqlite-node-1:4002,rqlite-node-2:4002,rqlite-node-3:4002"
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:4001/readyz || exit 1"]
+    interval: 3s
+    timeout: 3s
+    retries: 40
+    start_period: 5s
+
+services:
+  rqlite-node-1:
+    <<: *node-common
+    container_name: rqlite-node-1
+    hostname: rqlite-node-1
+    environment:
+      NO_COLOR: "1"
+      NODE_ID: "rqlite-node-1"
+      HTTP_ADV_ADDR: "rqlite-node-1:4001"
+      RAFT_ADV_ADDR: "rqlite-node-1:4002"
+
+  rqlite-node-2:
+    <<: *node-common
+    container_name: rqlite-node-2
+    hostname: rqlite-node-2
+    environment:
+      NO_COLOR: "1"
+      NODE_ID: "rqlite-node-2"
+      HTTP_ADV_ADDR: "rqlite-node-2:4001"
+      RAFT_ADV_ADDR: "rqlite-node-2:4002"
+
+  rqlite-node-3:
+    <<: *node-common
+    container_name: rqlite-node-3
+    hostname: rqlite-node-3
+    environment:
+      NO_COLOR: "1"
+      NODE_ID: "rqlite-node-3"
+      HTTP_ADV_ADDR: "rqlite-node-3:4001"
+      RAFT_ADV_ADDR: "rqlite-node-3:4002"
+
+  rqlite-workload:
+    platform: linux/amd64
+    init: true
+    build:
+      context: ../..
+      dockerfile: antithesis/Dockerfile
+      target: rqlite-workload
+    image: rqlite-workload:latest
+    container_name: rqlite-workload
+    hostname: rqlite-workload
+    environment:
+      NO_COLOR: "1"
+      RQLITE_NODES: "rqlite-node-1:4001,rqlite-node-2:4001,rqlite-node-3:4001"
+    depends_on:
+      rqlite-node-1:
+        condition: service_healthy
+      rqlite-node-2:
+        condition: service_healthy
+      rqlite-node-3:
+        condition: service_healthy
