@@ -3,7 +3,7 @@ name: Antithesis
 # On PRs: launch a short Antithesis run, diff property statuses against the
 # baseline recorded on the branch point, summarize with Claude, and post a
 # (soft, non-blocking) check + PR comment.
-# On push to master: launch a longer run and record its run_id as the baseline
+# On push to main: launch a longer run and record its run_id as the baseline
 # for future PRs (stored in a check-run's external_id, keyed to the commit).
 #
 # This v1 waits for the run inline (a run holds a runner for its duration +
@@ -12,7 +12,7 @@ name: Antithesis
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
     # Only run when something that affects behavior changes. Tune as needed.
     paths:
       - "store/**"
@@ -25,7 +25,7 @@ on:
       - "antithesis/**"
       - ".github/workflows/antithesis.yml"
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "store/**"
       - "db/**"
@@ -36,9 +36,9 @@ on:
       - "cdc/**"
       - "antithesis/**"
   schedule:
-    # Nightly deep run on master. GitHub cron is ALWAYS UTC. Scheduled runs
+    # Nightly deep run on main. GitHub cron is ALWAYS UTC. Scheduled runs
     # only fire from the default branch and use the workflow file on that
-    # branch — so this must be merged to master to take effect. Records a fresh
+    # branch — so this must be merged to main to take effect. Records a fresh
     # baseline each night and explores faults longer than per-PR runs.
     - cron: "0 7 * * *" # 07:00 UTC daily
   workflow_dispatch:
@@ -115,7 +115,7 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             pull_request)
-              echo "duration=10" >> "$GITHUB_OUTPUT"
+              echo "duration=30" >> "$GITHUB_OUTPUT"
               echo "mode=pr" >> "$GITHUB_OUTPUT" ;;
             push)
               echo "duration=30" >> "$GITHUB_OUTPUT"
@@ -185,7 +185,7 @@ jobs:
             echo "::warning::Run ended with status '$STATUS' (not 'completed')."
           fi
 
-      # ---- Baseline mode (push to master): record the run_id on the commit ----
+      # ---- Baseline mode (push to main): record the run_id on the commit ----
       - name: Record baseline
         if: steps.params.outputs.mode == 'baseline'
         env:
