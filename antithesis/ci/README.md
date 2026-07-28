@@ -9,14 +9,23 @@ Workflow: [`.github/workflows/antithesis.yml`](../../.github/workflows/antithesi
 ## How it works
 
 ```
-push → master        launch (30m) → wait → record run_id as a check-run
-                                            (external_id, keyed to the commit)
+schedule (nightly)   launch (4h)  → record run_id as a check-run, then exit
+                                     (does NOT wait — runs async on Antithesis)
+
+push → master        launch (30m) → record run_id as a check-run, then exit
+                                     (external_id, keyed to the commit)
 
 pull_request         launch (10m) → wait → resolve baseline (walk base-branch
                                             commits for the antithesis-baseline
                                             check) → diff statuses → Claude
                                             summary → PR comment + soft check
 ```
+
+**Baseline mode (nightly + push) launches and records without waiting.** A 4h
+nightly run must not hold a GitHub runner (hosted jobs hard-cap at 6h), and any
+PR that later diffs against it runs hours or days afterward — by then the run has
+finished on Antithesis. Only **PR mode** waits inline (~10-15 min) because it
+needs its own result immediately.
 
 - **Status-only diff.** We compare each property's `Passing`/`Failing` status,
   not counts or examples. A regression = a property that was `Passing` on the
@@ -65,12 +74,17 @@ All three are runnable locally (with `snouty`/`gh` authenticated) for debugging.
 
 ## Known limitations / upgrade paths
 
-- **Runner is held for the whole run.** v1 waits inline (~10–15 min on PRs). The
-  clean fix is a two-phase design: one workflow launches + records the `run_id`
-  on the PR (a pending check), and a separate trigger — an Antithesis webhook if
-  available, or a scheduled poller / `workflow_dispatch` — collects results when
-  the run finishes and updates the check/comment. The three scripts here are
-  already the collector; only the trigger wiring changes.
+- **PR runs hold a runner inline (~10–15 min).** Baseline runs (nightly/push)
+  do not — they launch, record, and exit. To make PRs async too, split PR mode
+  into launch (record `run_id` on a pending check) + a separate collector
+  triggered when the run finishes (Antithesis webhook, or a scheduled poller /
+  `workflow_dispatch`). The three scripts here are already the collector; only
+  the trigger wiring changes.
+- **Nightly is a 4h deep run** (`cron: "0 7 * * *"`, UTC). GitHub cron only fires
+  from the **default branch** and runs the workflow file **on that branch**, so
+  the nightly starts working only once this workflow is on `master`. Adjust the
+  time/duration in the workflow's `schedule` block and the `schedule)` case of
+  the *Determine run parameters* step.
 - **Status non-determinism.** Gate softly first; consider re-running once before
   treating a flip as a regression. Only hard-gate (`conclusion: failure`) once a
   property has proven stable across runs.

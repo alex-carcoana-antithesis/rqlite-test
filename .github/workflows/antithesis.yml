@@ -35,6 +35,12 @@ on:
       - "snapshot/**"
       - "cdc/**"
       - "antithesis/**"
+  schedule:
+    # Nightly deep run on master. GitHub cron is ALWAYS UTC. Scheduled runs
+    # only fire from the default branch and use the workflow file on that
+    # branch — so this must be merged to master to take effect. Records a fresh
+    # baseline each night and explores faults longer than per-PR runs.
+    - cron: "0 7 * * *" # 07:00 UTC daily
   workflow_dispatch:
     inputs:
       duration:
@@ -107,16 +113,21 @@ jobs:
         id: params
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "duration=10" >> "$GITHUB_OUTPUT"
-            echo "mode=pr" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "duration=30" >> "$GITHUB_OUTPUT"
-            echo "mode=baseline" >> "$GITHUB_OUTPUT"
-          else
-            echo "duration=${{ github.event.inputs.duration || '10' }}" >> "$GITHUB_OUTPUT"
-            echo "mode=pr" >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ github.event_name }}" in
+            pull_request)
+              echo "duration=10" >> "$GITHUB_OUTPUT"
+              echo "mode=pr" >> "$GITHUB_OUTPUT" ;;
+            push)
+              echo "duration=30" >> "$GITHUB_OUTPUT"
+              echo "mode=baseline" >> "$GITHUB_OUTPUT" ;;
+            schedule)
+              # Nightly deep run: 4h of fault exploration, records the baseline.
+              echo "duration=240" >> "$GITHUB_OUTPUT"
+              echo "mode=baseline" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "duration=${{ github.event.inputs.duration || '10' }}" >> "$GITHUB_OUTPUT"
+              echo "mode=pr" >> "$GITHUB_OUTPUT" ;;
+          esac
           echo "sha=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
           echo "branch=${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
@@ -148,8 +159,13 @@ jobs:
           fi
           echo "run_id=$RID" >> "$GITHUB_OUTPUT"
 
+      # Only PR mode waits inline (it needs its own result now). Baseline mode
+      # (push / nightly) launches and records the run_id without waiting — a 4h
+      # nightly must not hold a runner, and any PR that later diffs against it
+      # runs hours/days afterward, by which point the run has completed.
       - name: Wait for run to complete
         id: wait
+        if: steps.params.outputs.mode == 'pr'
         run: |
           set -euo pipefail
           RID="${{ steps.launch.outputs.run_id }}"
@@ -171,21 +187,23 @@ jobs:
 
       # ---- Baseline mode (push to master): record the run_id on the commit ----
       - name: Record baseline
-        if: steps.params.outputs.mode == 'baseline' && steps.wait.outputs.status == 'completed'
+        if: steps.params.outputs.mode == 'baseline'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           RID="${{ steps.launch.outputs.run_id }}"
           SHA="${{ steps.params.outputs.sha }}"
+          # Recorded right after launch — the run keeps executing on Antithesis.
+          # PRs that diff against it run much later, once it has finished.
           gh api -X POST "repos/${{ github.repository }}/check-runs" \
             -f name="$BASELINE_CHECK_NAME" \
             -f head_sha="$SHA" \
             -f status=completed \
             -f conclusion=neutral \
             -f external_id="$RID" \
-            -f output[title]="Antithesis baseline" \
-            -f output[summary]="Baseline run for status-diffing PRs: $RID"
+            -f output[title]="Antithesis baseline (${{ steps.params.outputs.duration }}m)" \
+            -f output[summary]="Baseline run for status-diffing PRs: $RID (launched; runs asynchronously on Antithesis)"
 
       # ---- PR mode: resolve baseline, diff, summarize, comment + check ----
       - name: Resolve baseline run
