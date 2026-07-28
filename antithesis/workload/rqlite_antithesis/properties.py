@@ -57,11 +57,18 @@ def strong_read_monotonic(ok, details):
     )
 
 
-def at_most_one_leader(leader_count, details):
+def at_most_one_leader_per_term(max_leaders_in_any_term, details):
     # property: single-leader
+    # Raft's real guarantee is one leader PER TERM, not one node in the Leader
+    # state at a single wall-clock instant. A deposed leader keeps reporting
+    # Leader (in its older term) until a higher-term RPC reaches it, so counting
+    # raw Leader states across terms produces false positives during election
+    # churn (see run 4b16...-58-3). Two nodes can never both win the same term,
+    # so grouping observed leaders by term and asserting <=1 per term is exactly
+    # the invariant, and it is immune to non-atomic polling across nodes.
     always(
-        leader_count <= 1,
-        "at most one node is the Raft leader at any time",
+        max_leaders_in_any_term <= 1,
+        "at most one node is the Raft leader in any single term",
         details,
     )
 
@@ -91,5 +98,32 @@ def queued_wait_committed(ok, details):
     sometimes(
         ok,
         "a queued write with wait=true is acknowledged",
+        details,
+    )
+
+
+# --- Durability & ordering (Always) ---------------------------------------
+
+def acked_write_durable(ok, details):
+    # property: acked-write-survives-failover
+    # A write the cluster acknowledged as committed must remain present on a
+    # subsequent strong (log-serialized) read, even across faults/failover that
+    # happen in between. Raft's durability guarantee: a committed entry survives
+    # any minority failure.
+    always(
+        ok,
+        "an acknowledged write is present on a subsequent strong read",
+        details,
+    )
+
+
+def queue_preserves_fifo_order(ok, details):
+    # property: queue-fifo-order
+    # Writes submitted through ?queue by one client to one node must commit in
+    # submission order. Rows carry an increasing seq; read back in commit order
+    # (ORDER BY the auto-assigned id), the seq values must be non-decreasing.
+    always(
+        ok,
+        "queued writes from one client commit in submission order",
         details,
     )

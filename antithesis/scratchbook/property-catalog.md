@@ -1,7 +1,7 @@
 ---
 sut_path: /Users/alexcarcoana/Desktop/rqlite
-commit: 28a7a521174dc4c2e4334b6ee552809c9567f030
-updated: 2026-07-06
+commit: 242b9d7f12e78b32d528e884a0f3c1a2d7469681
+updated: 2026-07-21
 external_references: []
 ---
 
@@ -148,14 +148,14 @@ surgical SDK assertion inside `store/store.go` (SUT source change).
 
 ## Category C — Control plane / consensus
 
-### [single-leader] — At most one leader at any instant
+### [single-leader] — At most one leader per term
 
 | | |
 |---|---|
 | **Type** | Safety |
-| **Property** | No two nodes simultaneously report `is_leader` (no split brain). |
-| **Invariant** | `Always(count(is_leader) <= 1)` (WL). The workload polls all three nodes' `/status` and asserts at most one reports leader, reusing `Cluster.cross_check_leader` (`system_test/e2e/helpers.py:713`). `Always` because Raft guarantees a single leader per term and overlapping leader claims would be a safety violation. |
-| **Antithesis Angle** | Partition-and-heal, asymmetric partitions, and clock skew probe the election/leader-lease logic for a window where two nodes both claim leadership. |
+| **Property** | No two nodes ever claim to be leader for the **same Raft term** (no split brain). |
+| **Invariant** | `Always(max_leaders_in_any_term <= 1)` (WL). The workload reads each node's `(store.raft.state, store.raft.term)` from one `/status` call, groups the nodes reporting `Leader` by term, and asserts no term has more than one leader. `Always` because two nodes can never both win the same term — a genuine violation regardless of when each node was polled. **Corrected from the earlier `count(is_leader) <= 1` formulation**, which was term-blind: it counted raw `Leader` states across terms and produced a false positive in run `4b16...-58-3` when a deposed leader still reported `Leader` in a stale term during election churn under a network clog. See that run's triage. |
+| **Antithesis Angle** | Partition-and-heal, asymmetric partitions, and clock skew probe the election/leader-lease logic for a window where two nodes both claim leadership **in the same term**; cross-term overlap during normal churn is expected and no longer flagged. |
 | **Why It Matters** | Split brain → two nodes accepting divergent writes → the ledger and register invariants both break. This is the root-cause detector. |
 
 **Open Questions:**
@@ -188,6 +188,8 @@ surgical SDK assertion inside `store/store.go` (SUT source change).
 | **Antithesis Angle** | Crash/leader-change during the drain loop (`http/service.go:1740-1799`) probes whether the retry-forever path preserves order or can reorder batches on re-submission. |
 | **Why It Matters** | Out-of-order application of queued writes would corrupt any order-dependent workload and violate the register's monotonicity. |
 
+**Status:** Implemented (WL) in `test/v1/rqlite/parallel_driver_writeslog.py` (`fifo_op`) via the `writes_log` table: a run of increasing-`seq` rows is queued to one node, then read back `ORDER BY id` (commit order) and asserted non-decreasing. Assertion: `queue_preserves_fifo_order` → "queued writes from one client commit in submission order".
+
 **Open Questions:**
 - Pure workload observation proves *committed* order but not that the queue channel itself never reorders internally; a tighter check would need an SUT-side assertion on sequence monotonicity in `runQueue`. `(partial: workload-side is sufficient for the externally-visible guarantee; note the SUT option.)`
 
@@ -200,6 +202,8 @@ surgical SDK assertion inside `store/store.go` (SUT source change).
 | **Invariant** | `Always(acked_version_present_after_failover)` (WL). The workload records every committed ack (register version / ledger transfer); after any fault + recovery it re-reads (strong) and asserts every acked value is still present. `Always` because Raft's durability guarantee is that a committed entry survives any minority failure. |
 | **Antithesis Angle** | Crash the leader immediately after ack; partition then heal; the check confirms the committed entry replicated to the quorum and survived, and that a *standard* (non-queued) ack really means committed. |
 | **Why It Matters** | "I got an OK and my data vanished" is the highest-severity durability bug. |
+
+**Status:** Implemented (WL) in `test/v1/rqlite/parallel_driver_writeslog.py` (`durability_op`): insert one row, capture its acked `last_insert_id`, then strong-read that id and assert it is present. Assertion: `acked_write_durable` → "an acknowledged write is present on a subsequent strong read".
 
 **Open Questions:**
 - Must distinguish standard-write acks (true commit) from queued `wait=false` acks (only enqueued, not durable). The oracle must only treat true-commit acks as promises. `(partial: only track standard / wait=true acks as durable.)`

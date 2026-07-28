@@ -114,6 +114,34 @@ class Rqlite:
         """Nodes currently reporting themselves as Raft leader."""
         return [n for n in self.nodes if self.raft_state(n) == "Leader"]
 
+    def raft_state_term(self, node):
+        """Return (state, term) for a node from ONE /status read, or (None, None).
+
+        Reading state and term from the same response keeps a node's pair
+        internally consistent (no split across two calls)."""
+        try:
+            st = self.status(node)
+            raft = st.get("store", {}).get("raft", {})
+            state = raft.get("state")
+            term_raw = raft.get("term")
+            term = int(term_raw) if term_raw is not None else None
+            return state, term
+        except (requests.RequestException, ValueError, TypeError):
+            return None, None
+
+    def leaders_by_term(self):
+        """Map Raft term -> list of nodes reporting themselves Leader in that term.
+
+        Raft permits at most one leader per term, so any term mapping to >1 node
+        is a genuine split-brain regardless of when each node was polled. Nodes
+        whose term is unknown (unreachable/error) are skipped."""
+        by_term = {}
+        for node in self.nodes:
+            state, term = self.raft_state_term(node)
+            if state == "Leader" and term is not None:
+                by_term.setdefault(term, []).append(node)
+        return by_term
+
 
 def first_row(resp):
     """Extract the first result row values from a query response, or None."""
@@ -135,3 +163,15 @@ def result_error(resp):
     if not results:
         return None
     return results[0].get("error")
+
+
+def last_insert_id(resp):
+    """Return last_insert_id from the first execute result, or None."""
+    results = resp.get("results", [])
+    if not results or results[0].get("error"):
+        return None
+    val = results[0].get("last_insert_id")
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
