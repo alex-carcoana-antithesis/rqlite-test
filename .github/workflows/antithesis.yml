@@ -1,0 +1,261 @@
+name: Antithesis
+
+# On PRs: launch a short Antithesis run, diff property statuses against the
+# baseline recorded on the branch point, summarize with Claude, and post a
+# (soft, non-blocking) check + PR comment.
+# On push to master: launch a longer run and record its run_id as the baseline
+# for future PRs (stored in a check-run's external_id, keyed to the commit).
+#
+# This v1 waits for the run inline (a run holds a runner for its duration +
+# analysis). See antithesis/ci/README.md for the two-phase (launch + collector)
+# upgrade that avoids holding a runner, and for the required secrets/vars.
+
+on:
+  pull_request:
+    branches: [master]
+    # Only run when something that affects behavior changes. Tune as needed.
+    paths:
+      - "store/**"
+      - "db/**"
+      - "cluster/**"
+      - "http/**"
+      - "command/**"
+      - "snapshot/**"
+      - "cdc/**"
+      - "antithesis/**"
+      - ".github/workflows/antithesis.yml"
+  push:
+    branches: [master]
+    paths:
+      - "store/**"
+      - "db/**"
+      - "cluster/**"
+      - "http/**"
+      - "command/**"
+      - "snapshot/**"
+      - "cdc/**"
+      - "antithesis/**"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Run duration in minutes"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: antithesis-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONFIG_DIR: antithesis/config
+  WEBHOOK: basic_test
+  # Correct target for this project. Override with repo variables if they move.
+  ANTITHESIS_TENANT: ${{ vars.ANTITHESIS_TENANT || 'rose-cheetah' }}
+  ANTITHESIS_REPOSITORY: ${{ vars.ANTITHESIS_REPOSITORY || 'us-central1-docker.pkg.dev/molten-verve-216720/rose-pcheetah-repository' }}
+  ANTITHESIS_API_KEY: ${{ secrets.ANTITHESIS_API_KEY }}
+  BASELINE_CHECK_NAME: antithesis-baseline
+
+jobs:
+  antithesis:
+    runs-on: ubuntu-latest
+    # A 10-30m run + analysis can exceed the 6h default only in pathological
+    # cases; keep a generous ceiling.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout (full history for merge-base / baseline walk-back)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # For PRs, check out the actual head commit (not the merge ref) so the
+          # check-run and comment attach to the right SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling (snouty, jq, anthropic SDK)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y jq
+          python -m pip install --upgrade pip
+          pip install anthropic
+          # TODO: replace with your org's canonical snouty installer. snouty is a
+          # Rust binary; installing from source works but is slow — cache or
+          # vendor a released binary for speed. See:
+          # https://raw.githubusercontent.com/antithesishq/snouty/refs/heads/main/README.md
+          cargo install --locked --git https://github.com/antithesishq/snouty snouty || true
+          if ! command -v snouty >/dev/null 2>&1; then
+            echo "::error::snouty is not installed. Update the install step in this workflow." >&2
+            exit 1
+          fi
+          snouty --version
+
+      - name: Log in to image registry
+        run: |
+          set -euo pipefail
+          echo '${{ secrets.ANTITHESIS_REGISTRY_KEY }}' \
+            | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev
+
+      - name: Determine run parameters
+        id: params
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "duration=10" >> "$GITHUB_OUTPUT"
+            echo "mode=pr" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "duration=30" >> "$GITHUB_OUTPUT"
+            echo "mode=baseline" >> "$GITHUB_OUTPUT"
+          else
+            echo "duration=${{ github.event.inputs.duration || '10' }}" >> "$GITHUB_OUTPUT"
+            echo "mode=pr" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "branch=${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build images
+        run: docker compose -f "$CONFIG_DIR/docker-compose.yaml" build
+
+      - name: Validate config
+        run: snouty validate "$CONFIG_DIR"
+
+      - name: Launch run
+        id: launch
+        run: |
+          set -euo pipefail
+          SHA="${{ steps.params.outputs.sha }}"
+          BRANCH="${{ steps.params.outputs.branch }}"
+          OUT=$(snouty launch \
+            --json \
+            --webhook "$WEBHOOK" \
+            --config "$CONFIG_DIR" \
+            --duration "${{ steps.params.outputs.duration }}" \
+            --source rqlite \
+            --test-name "rqlite/${BRANCH}" \
+            --description "CI run on ${BRANCH} @ ${SHA} (${{ github.event_name }})")
+          echo "$OUT"
+          RID=$(echo "$OUT" | jq -r 'select(.runId != null) | .runId' | tail -n1)
+          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
+            echo "::error::Could not parse run_id from snouty launch output" >&2
+            exit 1
+          fi
+          echo "run_id=$RID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for run to complete
+        id: wait
+        run: |
+          set -euo pipefail
+          RID="${{ steps.launch.outputs.run_id }}"
+          # Poll until the run reaches a terminal status or we time out.
+          DEADLINE=$(( $(date +%s) + 60*(${{ steps.params.outputs.duration }} + 40) ))
+          STATUS="starting"
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            STATUS=$(snouty runs --json show "$RID" | jq -r '.status // "unknown"')
+            echo "status=$STATUS"
+            case "$STATUS" in
+              completed|incomplete|cancelled) break ;;
+            esac
+            sleep 30
+          done
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          if [ "$STATUS" != "completed" ]; then
+            echo "::warning::Run ended with status '$STATUS' (not 'completed')."
+          fi
+
+      # ---- Baseline mode (push to master): record the run_id on the commit ----
+      - name: Record baseline
+        if: steps.params.outputs.mode == 'baseline' && steps.wait.outputs.status == 'completed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RID="${{ steps.launch.outputs.run_id }}"
+          SHA="${{ steps.params.outputs.sha }}"
+          gh api -X POST "repos/${{ github.repository }}/check-runs" \
+            -f name="$BASELINE_CHECK_NAME" \
+            -f head_sha="$SHA" \
+            -f status=completed \
+            -f conclusion=neutral \
+            -f external_id="$RID" \
+            -f output[title]="Antithesis baseline" \
+            -f output[summary]="Baseline run for status-diffing PRs: $RID"
+
+      # ---- PR mode: resolve baseline, diff, summarize, comment + check ----
+      - name: Resolve baseline run
+        id: baseline
+        if: steps.params.outputs.mode == 'pr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BASE_REF="${{ github.base_ref }}"
+          MB=$(git merge-base "origin/${BASE_REF}" "${{ steps.params.outputs.sha }}" || echo "")
+          if [ -z "$MB" ]; then MB="origin/${BASE_REF}"; fi
+          RID=$(python antithesis/ci/resolve_baseline.py "${{ github.repository }}" "$MB" "$BASELINE_CHECK_NAME")
+          echo "run_id=${RID}" >> "$GITHUB_OUTPUT"
+          echo "Resolved baseline run_id: '${RID}'"
+
+      - name: Diff property statuses
+        id: diff
+        if: steps.params.outputs.mode == 'pr'
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.baseline.outputs.run_id }}"
+          python antithesis/ci/diff_runs.py "${BASE:--}" "${{ steps.launch.outputs.run_id }}"
+
+      - name: Summarize with Claude
+        if: steps.params.outputs.mode == 'pr'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python antithesis/ci/summarize.py
+
+      - name: Upsert PR comment
+        if: steps.params.outputs.mode == 'pr' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR="${{ github.event.pull_request.number }}"
+          MARKER="<!-- antithesis-ci -->"
+          BODY="$(cat summary.md)"
+          EXISTING=$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --jq "map(select(.body | contains(\"${MARKER}\"))) | .[0].id // empty")
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${EXISTING}" \
+              -f body="$BODY" >/dev/null
+          else
+            gh api -X POST "repos/${{ github.repository }}/issues/${PR}/comments" \
+              -f body="$BODY" >/dev/null
+          fi
+
+      - name: Post result check (soft / non-blocking)
+        if: steps.params.outputs.mode == 'pr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RID="${{ steps.launch.outputs.run_id }}"
+          SHA="${{ steps.params.outputs.sha }}"
+          HAS_REG="${{ steps.diff.outputs.has_regressions }}"
+          if [ "$HAS_REG" = "true" ]; then
+            TITLE="Antithesis: properties went Passing → Failing (investigate)"
+          else
+            TITLE="Antithesis: no property regressions"
+          fi
+          # Conclusion is 'neutral' so this never blocks merge in v1. Flip to
+          # 'failure' once properties are proven low-noise to hard-gate.
+          gh api -X POST "repos/${{ github.repository }}/check-runs" \
+            -f name="antithesis" \
+            -f head_sha="$SHA" \
+            -f status=completed \
+            -f conclusion=neutral \
+            -f external_id="$RID" \
+            -f output[title]="$TITLE" \
+            -f output[summary]="$(cat summary.md)"
