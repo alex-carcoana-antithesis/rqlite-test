@@ -15,7 +15,7 @@ schedule (nightly)   launch (4h)  → record run_id as a check-run, then exit
 push → master        launch (30m) → record run_id as a check-run, then exit
                                      (external_id, keyed to the commit)
 
-pull_request         launch (10m) → wait → resolve baseline (walk base-branch
+pull_request         launch (30m) → wait → resolve baseline (walk base-branch
                                             commits for the antithesis-baseline
                                             check) → diff statuses → Claude
                                             summary → PR comment + soft check
@@ -24,8 +24,8 @@ pull_request         launch (10m) → wait → resolve baseline (walk base-branc
 **Baseline mode (nightly + push) launches and records without waiting.** A 4h
 nightly run must not hold a GitHub runner (hosted jobs hard-cap at 6h), and any
 PR that later diffs against it runs hours or days afterward — by then the run has
-finished on Antithesis. Only **PR mode** waits inline (~10-15 min) because it
-needs its own result immediately.
+finished on Antithesis. Only **PR mode** waits inline (~30 min run + analysis)
+because it needs its own result immediately.
 
 - **Status-only diff.** We compare each property's `Passing`/`Failing` status,
   not counts or examples. A regression = a property that was `Passing` on the
@@ -74,7 +74,7 @@ All three are runnable locally (with `snouty`/`gh` authenticated) for debugging.
 
 ## Known limitations / upgrade paths
 
-- **PR runs hold a runner inline (~10–15 min).** Baseline runs (nightly/push)
+- **PR runs hold a runner inline (~30 min run + analysis).** Baseline runs (nightly/push)
   do not — they launch, record, and exit. To make PRs async too, split PR mode
   into launch (record `run_id` on a pending check) + a separate collector
   triggered when the run finishes (Antithesis webhook, or a scheduled poller /

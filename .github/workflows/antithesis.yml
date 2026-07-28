@@ -115,7 +115,7 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             pull_request)
-              echo "duration=10" >> "$GITHUB_OUTPUT"
+              echo "duration=30" >> "$GITHUB_OUTPUT"
               echo "mode=pr" >> "$GITHUB_OUTPUT" ;;
             push)
               echo "duration=30" >> "$GITHUB_OUTPUT"
