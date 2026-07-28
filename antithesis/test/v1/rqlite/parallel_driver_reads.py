@@ -47,11 +47,19 @@ def read_version(client, level):
 
 def check_single_leader(client):
     try:
-        leaders = client.leaders()
+        by_term = client.leaders_by_term()
     except Exception:
         return
-    properties.at_most_one_leader(len(leaders), {"leaders": leaders})
-    properties.leader_present(len(leaders) >= 1, {"leaders": leaders})
+    # The real Raft invariant is <=1 leader PER TERM. Grouping by term makes the
+    # check immune to the cross-term overlap seen during election churn under
+    # network faults (an old leader still claiming Leader in a stale term).
+    max_in_term = max((len(nodes) for nodes in by_term.values()), default=0)
+    total_leaders = sum(len(nodes) for nodes in by_term.values())
+    properties.at_most_one_leader_per_term(
+        max_in_term,
+        {"leaders_by_term": by_term, "max_in_any_term": max_in_term},
+    )
+    properties.leader_present(total_leaders >= 1, {"leaders_by_term": by_term})
 
 
 def main():

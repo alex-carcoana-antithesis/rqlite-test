@@ -24,6 +24,12 @@ def setup(client):
     ddl = [
         ["CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, balance INTEGER NOT NULL)"],
         ["CREATE TABLE IF NOT EXISTS registers (k INTEGER PRIMARY KEY, version INTEGER NOT NULL)"],
+        # Append-only log used by the durability + queue-FIFO checks. id is the
+        # auto-assigned commit order; batch groups one op's writes; seq is the
+        # submission order within a batch. AUTOINCREMENT is deterministic across
+        # replicas because every FSM applies the log in the same order.
+        ["CREATE TABLE IF NOT EXISTS writes_log ("
+         "id INTEGER PRIMARY KEY AUTOINCREMENT, batch INTEGER NOT NULL, seq INTEGER NOT NULL)"],
     ]
     client.execute(ddl, transaction=True)
 
