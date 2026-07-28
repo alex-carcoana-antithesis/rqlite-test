@@ -1,6 +1,6 @@
 # Antithesis CI
 
-Runs an Antithesis test on every PR (and on pushes to `master`), diffs the
+Runs an Antithesis test on every PR (and on pushes to `main`), diffs the
 resulting **property statuses** against a baseline, has Claude summarize the
 takeaways, and posts them back to the PR as a comment + a soft check.
 
@@ -12,10 +12,10 @@ Workflow: [`.github/workflows/antithesis.yml`](../../.github/workflows/antithesi
 schedule (nightly)   launch (4h)  → record run_id as a check-run, then exit
                                      (does NOT wait — runs async on Antithesis)
 
-push → master        launch (30m) → record run_id as a check-run, then exit
+push → main        launch (30m) → record run_id as a check-run, then exit
                                      (external_id, keyed to the commit)
 
-pull_request         launch (10m) → wait → resolve baseline (walk base-branch
+pull_request         launch (30m) → wait → resolve baseline (walk base-branch
                                             commits for the antithesis-baseline
                                             check) → diff statuses → Claude
                                             summary → PR comment + soft check
@@ -24,17 +24,17 @@ pull_request         launch (10m) → wait → resolve baseline (walk base-branc
 **Baseline mode (nightly + push) launches and records without waiting.** A 4h
 nightly run must not hold a GitHub runner (hosted jobs hard-cap at 6h), and any
 PR that later diffs against it runs hours or days afterward — by then the run has
-finished on Antithesis. Only **PR mode** waits inline (~10-15 min) because it
-needs its own result immediately.
+finished on Antithesis. Only **PR mode** waits inline (~30 min run + analysis)
+because it needs its own result immediately.
 
 - **Status-only diff.** We compare each property's `Passing`/`Failing` status,
   not counts or examples. A regression = a property that was `Passing` on the
   baseline and is `Failing` now.
-- **Baseline selection uses the Checks API.** Each `master` run stores its
+- **Baseline selection uses the Checks API.** Each `main` run stores its
   Antithesis `run_id` in an `antithesis-baseline` check-run's `external_id`,
   keyed to the commit. A PR resolves its baseline by walking back from the
   merge-base until it finds a commit that has one. This pins the diff to the
-  branch point rather than "latest master".
+  branch point rather than "latest main".
 - **Soft gate.** The result check is posted with conclusion `neutral`, so it
   never blocks merge. Antithesis explores different fault orderings each run, so
   a single `Passing → Failing` flip can be search luck, not a code regression —
@@ -74,7 +74,7 @@ All three are runnable locally (with `snouty`/`gh` authenticated) for debugging.
 
 ## Known limitations / upgrade paths
 
-- **PR runs hold a runner inline (~10–15 min).** Baseline runs (nightly/push)
+- **PR runs hold a runner inline (~30 min run + analysis).** Baseline runs (nightly/push)
   do not — they launch, record, and exit. To make PRs async too, split PR mode
   into launch (record `run_id` on a pending check) + a separate collector
   triggered when the run finishes (Antithesis webhook, or a scheduled poller /
@@ -82,7 +82,7 @@ All three are runnable locally (with `snouty`/`gh` authenticated) for debugging.
   the trigger wiring changes.
 - **Nightly is a 4h deep run** (`cron: "0 7 * * *"`, UTC). GitHub cron only fires
   from the **default branch** and runs the workflow file **on that branch**, so
-  the nightly starts working only once this workflow is on `master`. Adjust the
+  the nightly starts working only once this workflow is on `main`. Adjust the
   time/duration in the workflow's `schedule` block and the `schedule)` case of
   the *Determine run parameters* step.
 - **Status non-determinism.** Gate softly first; consider re-running once before

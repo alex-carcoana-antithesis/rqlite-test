@@ -22,7 +22,7 @@ from antithesis.random import get_random, random_choice
 from rqlite_antithesis.client import INITIAL_TOTAL, REGISTER_KEY, Rqlite, first_row
 from rqlite_antithesis import properties
 
-READS_PER_INVOCATION = 40
+READS_PER_INVOCATION = 60
 
 
 def read_ledger(client, level):
