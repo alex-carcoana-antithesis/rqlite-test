@@ -60,6 +60,10 @@ concurrency:
 env:
   CONFIG_DIR: antithesis/config
   WEBHOOK: basic_test
+  # The runner has both podman and docker; snouty auto-picks podman, but we build
+  # into docker's image store (they keep separate stores). Force snouty to use
+  # docker so validate/launch see the images we just built.
+  SNOUTY_CONTAINER_ENGINE: docker
   # Correct target for this project. Override with repo variables if they move.
   ANTITHESIS_TENANT: ${{ vars.ANTITHESIS_TENANT || 'rose-cheetah' }}
   ANTITHESIS_REPOSITORY: ${{ vars.ANTITHESIS_REPOSITORY || 'us-central1-docker.pkg.dev/molten-verve-216720/rose-pcheetah-repository' }}
