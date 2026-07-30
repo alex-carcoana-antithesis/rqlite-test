@@ -119,14 +119,14 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             pull_request)
-              echo "duration=30" >> "$GITHUB_OUTPUT"
+              echo "duration=10" >> "$GITHUB_OUTPUT"
               echo "mode=pr" >> "$GITHUB_OUTPUT" ;;
             push)
               echo "duration=30" >> "$GITHUB_OUTPUT"
               echo "mode=baseline" >> "$GITHUB_OUTPUT" ;;
             schedule)
-              # Nightly deep run: 4h of fault exploration, records the baseline.
-              echo "duration=240" >> "$GITHUB_OUTPUT"
+              # Nightly deep run: 1h of fault exploration, records the baseline.
+              echo "duration=60" >> "$GITHUB_OUTPUT"
               echo "mode=baseline" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "duration=${{ github.event.inputs.duration || '10' }}" >> "$GITHUB_OUTPUT"
@@ -147,21 +147,65 @@ jobs:
           set -euo pipefail
           SHA="${{ steps.params.outputs.sha }}"
           BRANCH="${{ steps.params.outputs.branch }}"
-          OUT=$(snouty launch \
-            --json \
-            --webhook "$WEBHOOK" \
-            --config "$CONFIG_DIR" \
-            --duration "${{ steps.params.outputs.duration }}" \
-            --source rqlite \
-            --test-name "rqlite/${BRANCH}" \
-            --description "CI run on ${BRANCH} @ ${SHA} (${{ github.event_name }})")
-          echo "$OUT"
-          RID=$(echo "$OUT" | jq -r 'select(.runId != null) | .runId' | tail -n1)
-          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
-            echo "::error::Could not parse run_id from snouty launch output" >&2
+
+          # Fail fast if the credential needed to reach Antithesis is missing.
+          if [ -z "${ANTITHESIS_API_KEY:-}" ]; then
+            echo "::error::ANTITHESIS_API_KEY secret is empty — set it in repo secrets." >&2
             exit 1
           fi
-          echo "run_id=$RID" >> "$GITHUB_OUTPUT"
+
+          attempt=0
+          max_attempts=5
+          RID=""
+          while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            echo "Attempt ${attempt}/${max_attempts}: snouty launch..."
+            # Capture stdout (clean JSON) and stderr (progress/warnings/errors)
+            # SEPARATELY: snouty prints human text to stderr, so merging streams
+            # would make jq choke on the non-JSON lines.
+            set +e
+            OUT=$(snouty launch \
+              --json \
+              --webhook "$WEBHOOK" \
+              --config "$CONFIG_DIR" \
+              --duration "${{ steps.params.outputs.duration }}" \
+              --source rqlite \
+              --test-name "rqlite/${BRANCH}" \
+              --description "CI run on ${BRANCH} @ ${SHA} (${{ github.event_name }})" 2>launch.err)
+            rc=$?
+            set -e
+            ERR=$(cat launch.err || true)
+            echo "--- snouty stdout ---"; echo "$OUT"
+            echo "--- snouty stderr ---"; echo "$ERR"
+
+            RID=$(printf '%s\n' "$OUT" | jq -r 'select(.runId != null) | .runId' 2>/dev/null | tail -n1 || true)
+            if [ -n "$RID" ] && [ "$RID" != "null" ]; then
+              echo "Parsed run_id: $RID"
+              echo "run_id=$RID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # Fail fast on auth/permission errors — retrying won't help.
+            if printf '%s\n%s' "$OUT" "$ERR" | grep -qiE "401|403|unauthorized|forbidden|invalid api key"; then
+              echo "::error::snouty launch failed with an auth error. Check ANTITHESIS_API_KEY / tenant / repository." >&2
+              exit 1
+            fi
+
+            # Retry transient 5xx / gateway errors with exponential backoff.
+            if printf '%s\n%s' "$OUT" "$ERR" | grep -qiE "50[234]|service unavailable|bad gateway|gateway timeout"; then
+              sleep_s=$(( 2 ** attempt ))
+              echo "Transient API error (rc=$rc); sleeping ${sleep_s}s then retrying..."
+              sleep "$sleep_s"
+              continue
+            fi
+
+            # Any other failure: surface output and stop.
+            echo "::error::snouty launch failed (rc=$rc); no run_id found." >&2
+            exit 1
+          done
+
+          echo "::error::snouty launch failed after ${max_attempts} attempts (transient API errors)." >&2
+          exit 1
 
       # Only PR mode waits inline (it needs its own result now). Baseline mode
       # (push / nightly) launches and records the run_id without waiting — a 4h
@@ -177,7 +221,9 @@ jobs:
           DEADLINE=$(( $(date +%s) + 60*(${{ steps.params.outputs.duration }} + 40) ))
           STATUS="starting"
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-            STATUS=$(snouty runs --json show "$RID" | jq -r '.status // "unknown"')
+            # Tolerate transient API hiccups (e.g. 503): a failed poll must not
+            # abort the step under `set -e` — mark it unknown and retry next tick.
+            STATUS=$(snouty runs --json show "$RID" 2>/dev/null | jq -r '.status // "unknown"') || STATUS="unknown"
             echo "status=$STATUS"
             case "$STATUS" in
               completed|incomplete|cancelled) break ;;

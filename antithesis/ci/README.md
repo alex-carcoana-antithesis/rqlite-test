@@ -9,22 +9,22 @@ Workflow: [`.github/workflows/antithesis.yml`](../../.github/workflows/antithesi
 ## How it works
 
 ```
-schedule (nightly)   launch (4h)  → record run_id as a check-run, then exit
+schedule (nightly)   launch (1h)  → record run_id as a check-run, then exit
                                      (does NOT wait — runs async on Antithesis)
 
 push → main        launch (30m) → record run_id as a check-run, then exit
                                      (external_id, keyed to the commit)
 
-pull_request         launch (30m) → wait → resolve baseline (walk base-branch
+pull_request         launch (10m) → wait → resolve baseline (walk base-branch
                                             commits for the antithesis-baseline
                                             check) → diff statuses → Claude
                                             summary → PR comment + soft check
 ```
 
-**Baseline mode (nightly + push) launches and records without waiting.** A 4h
+**Baseline mode (nightly + push) launches and records without waiting.** A long
 nightly run must not hold a GitHub runner (hosted jobs hard-cap at 6h), and any
 PR that later diffs against it runs hours or days afterward — by then the run has
-finished on Antithesis. Only **PR mode** waits inline (~30 min run + analysis)
+finished on Antithesis. Only **PR mode** waits inline (~10 min run + analysis)
 because it needs its own result immediately.
 
 - **Status-only diff.** We compare each property's `Passing`/`Failing` status,
@@ -74,13 +74,13 @@ All three are runnable locally (with `snouty`/`gh` authenticated) for debugging.
 
 ## Known limitations / upgrade paths
 
-- **PR runs hold a runner inline (~30 min run + analysis).** Baseline runs (nightly/push)
+- **PR runs hold a runner inline (~10 min run + analysis).** Baseline runs (nightly/push)
   do not — they launch, record, and exit. To make PRs async too, split PR mode
   into launch (record `run_id` on a pending check) + a separate collector
   triggered when the run finishes (Antithesis webhook, or a scheduled poller /
   `workflow_dispatch`). The three scripts here are already the collector; only
   the trigger wiring changes.
-- **Nightly is a 4h deep run** (`cron: "0 7 * * *"`, UTC). GitHub cron only fires
+- **Nightly is a 1h deep run** (`cron: "0 7 * * *"`, UTC). GitHub cron only fires
   from the **default branch** and runs the workflow file **on that branch**, so
   the nightly starts working only once this workflow is on `main`. Adjust the
   time/duration in the workflow's `schedule` block and the `schedule)` case of
